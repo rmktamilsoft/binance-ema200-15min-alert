@@ -4,7 +4,7 @@ import json
 import requests
 import pandas as pd
 
-BINANCE_URL = "https://api.binance.com"
+BINANCE_URL = "https://data-api.binance.vision"
 
 # ============================================================
 # TELEGRAM CONFIG
