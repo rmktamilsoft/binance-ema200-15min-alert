@@ -764,7 +764,7 @@ def main():
 
     new_alerts = 0
 
-    # =====================================================
+        # =====================================================
     # SEND ALERTS
     # =====================================================
 
@@ -778,28 +778,27 @@ def main():
 
         previous_state = state.get(symbol)
 
-# Handle old state format
-if isinstance(previous_state, str):
+        # Handle old state format
+        if isinstance(previous_state, str):
 
-    previous_setup_id = previous_state
+            previous_setup_id = previous_state
 
-elif isinstance(previous_state, dict):
+        elif isinstance(previous_state, dict):
 
-    previous_setup_id = previous_state.get("setup_id")
+            previous_setup_id = previous_state.get("setup_id")
 
-else:
+        else:
 
-    previous_setup_id = None
+            previous_setup_id = None
 
+        if previous_setup_id == setup_id:
 
-if previous_setup_id == setup_id:
+            print(
+                f"{symbol} -> 🔁 DUPLICATE "
+                f"(already alerted)"
+            )
 
-    print(
-        f"{symbol} -> 🔁 DUPLICATE "
-        f"(already alerted)"
-    )
-
-    continue
+            continue
 
         message = create_alert_message(
             signal
