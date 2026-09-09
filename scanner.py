@@ -7,69 +7,39 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 BINANCE_URL = "https://data-api.binance.vision"
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-
-TELEGRAM_CHAT_IDS = [
-    chat_id.strip()
-    for chat_id in os.environ["TELEGRAM_CHAT_IDS"].split(",")
-    if chat_id.strip()
-]
-
-TELEGRAM_DELAY = 1.2
-
-
-# =========================================================
-# STRATEGY SETTINGS
-# =========================================================
-
 INTERVAL = "15m"
-
 EMA_PERIOD = 200
-
 REQUIRED_CANDLES = 4
 
 MAX_PRICE = 5.0
 
 STRUCTURE_LENGTH = 5
-
 CHOCH_LOOKBACK_CANDLES = 32
 
-# Parallel Binance requests
 MAX_WORKERS = 10
 
-# State file
 STATE_FILE = "alert_state.json"
 
+TELEGRAM_DELAY = 1.2
+
 
 # =========================================================
-# STATE
+# TELEGRAM
 # =========================================================
 
-def load_state():
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-    if not os.path.exists(STATE_FILE):
-        return {}
-
-    try:
-
-        with open(STATE_FILE, "r") as file:
-            return json.load(file)
-
-    except Exception:
-
-        return {}
-
-
-def save_state(state):
-
-    with open(STATE_FILE, "w") as file:
-        json.dump(
-            state,
-            file,
-            indent=2
-        )
+TELEGRAM_CHAT_IDS = [
+    x.strip()
+    for x in os.getenv("TELEGRAM_CHAT_IDS", "").split(",")
+    if x.strip()
+]
 
 
 # =========================================================
@@ -80,28 +50,21 @@ def get_usdt_symbols():
 
     url = f"{BINANCE_URL}/api/v3/exchangeInfo"
 
-    response = requests.get(
-        url,
-        timeout=20
-    )
-
+    response = requests.get(url, timeout=20)
     response.raise_for_status()
 
     data = response.json()
 
     symbols = []
 
-    for symbol_info in data["symbols"]:
+    for item in data["symbols"]:
 
         if (
-            symbol_info["status"] == "TRADING"
-            and symbol_info["quoteAsset"] == "USDT"
-            and symbol_info["isSpotTradingAllowed"]
+            item["status"] == "TRADING"
+            and item["quoteAsset"] == "USDT"
+            and item["isSpotTradingAllowed"]
         ):
-
-            symbols.append(
-                symbol_info["symbol"]
-            )
+            symbols.append(item["symbol"])
 
     return symbols
 
@@ -131,25 +94,24 @@ def get_klines(symbol, limit=250):
 # DATAFRAME
 # =========================================================
 
-def create_dataframe(candles):
+def create_dataframe(klines):
 
-    df = pd.DataFrame(
-        candles,
-        columns=[
-            "open_time",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "close_time",
-            "quote_volume",
-            "trades",
-            "taker_base",
-            "taker_quote",
-            "ignore"
-        ]
-    )
+    columns = [
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_volume",
+        "trades",
+        "taker_base",
+        "taker_quote",
+        "ignore"
+    ]
+
+    df = pd.DataFrame(klines, columns=columns)
 
     numeric_columns = [
         "open",
@@ -159,32 +121,14 @@ def create_dataframe(candles):
         "volume"
     ]
 
-    for column in numeric_columns:
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col])
 
-        df[column] = pd.to_numeric(
-            df[column]
-        )
-
-    # Remove currently forming candle
-    current_time = int(
-        time.time() * 1000
-    )
-
-    df = df[
-        df["close_time"] < current_time
-    ].copy()
-
-    df.reset_index(
-        drop=True,
-        inplace=True
-    )
+    df["open_time"] = pd.to_numeric(df["open_time"])
+    df["close_time"] = pd.to_numeric(df["close_time"])
 
     return df
 
-
-# =========================================================
-# EMA
-# =========================================================
 
 def calculate_ema(df):
 
@@ -201,125 +145,73 @@ def calculate_ema(df):
 
 
 # =========================================================
-# PIVOTS
+# STRUCTURE
 # =========================================================
 
-def find_pivot_high(
-    df,
-    index,
-    length
-):
+def find_pivot_high(df, index, length):
 
     pivot_index = index - length
 
     if pivot_index < length:
         return None
 
-    if pivot_index >= len(df):
+    if pivot_index + length >= len(df):
         return None
 
-    pivot_high = float(
-        df.iloc[pivot_index]["high"]
-    )
+    pivot_high = df.iloc[pivot_index]["high"]
 
     left_highs = df.iloc[
         pivot_index - length:pivot_index
     ]["high"]
 
     right_highs = df.iloc[
-        pivot_index + 1:index + 1
+        pivot_index + 1:pivot_index + length + 1
     ]["high"]
 
-    if (
-        len(left_highs) < length
-        or len(right_highs) < length
-    ):
-        return None
-
-    if (
-        pivot_high > left_highs.max()
-        and pivot_high > right_highs.max()
-    ):
-
-        return {
-            "index": pivot_index,
-            "price": pivot_high
-        }
+    if pivot_high > left_highs.max() and pivot_high >= right_highs.max():
+        return pivot_high
 
     return None
 
 
-def find_pivot_low(
-    df,
-    index,
-    length
-):
+def find_pivot_low(df, index, length):
 
     pivot_index = index - length
 
     if pivot_index < length:
         return None
 
-    if pivot_index >= len(df):
+    if pivot_index + length >= len(df):
         return None
 
-    pivot_low = float(
-        df.iloc[pivot_index]["low"]
-    )
+    pivot_low = df.iloc[pivot_index]["low"]
 
     left_lows = df.iloc[
         pivot_index - length:pivot_index
     ]["low"]
 
     right_lows = df.iloc[
-        pivot_index + 1:index + 1
+        pivot_index + 1:pivot_index + length + 1
     ]["low"]
 
-    if (
-        len(left_lows) < length
-        or len(right_lows) < length
-    ):
-        return None
-
-    if (
-        pivot_low < left_lows.min()
-        and pivot_low < right_lows.min()
-    ):
-
-        return {
-            "index": pivot_index,
-            "price": pivot_low
-        }
+    if pivot_low < left_lows.min() and pivot_low <= right_lows.min():
+        return pivot_low
 
     return None
 
 
-# =========================================================
-# BULLISH STRUCTURE CHANGE
-# =========================================================
-
 def detect_bullish_choch(df):
-
-    if len(df) < 100:
-        return None
 
     trend = None
 
     active_high = None
     active_low = None
 
-    latest_choch = None
+    choch_events = []
 
-    previous_close = None
+    for i in range(len(df)):
 
-    for i in range(
-        STRUCTURE_LENGTH * 2,
-        len(df)
-    ):
-
-        # -----------------------------------------
-        # New confirmed pivot high
-        # -----------------------------------------
+        row = df.iloc[i]
 
         pivot_high = find_pivot_high(
             df,
@@ -327,385 +219,400 @@ def detect_bullish_choch(df):
             STRUCTURE_LENGTH
         )
 
-        if pivot_high is not None:
-
-            active_high = pivot_high
-
-        # -----------------------------------------
-        # New confirmed pivot low
-        # -----------------------------------------
-
         pivot_low = find_pivot_low(
             df,
             i,
             STRUCTURE_LENGTH
         )
 
-        if pivot_low is not None:
+        if pivot_high is not None:
+            active_high = pivot_high
 
+        if pivot_low is not None:
             active_low = pivot_low
 
-        current_close = float(
-            df.iloc[i]["close"]
-        )
-
-        # -----------------------------------------
-        # Bearish structure
-        # -----------------------------------------
+        # ---------------------------------------------
+        # Bearish structure break
+        # ---------------------------------------------
 
         if (
             active_low is not None
-            and previous_close is not None
-            and previous_close >= active_low["price"]
-            and current_close < active_low["price"]
+            and row["close"] < active_low
         ):
 
             trend = "BEARISH"
 
-        # -----------------------------------------
-        # Bullish structure change
-        # -----------------------------------------
+        # ---------------------------------------------
+        # Bullish structure break
+        # ---------------------------------------------
 
         if (
-            trend == "BEARISH"
-            and active_high is not None
-            and previous_close is not None
-            and previous_close <= active_high["price"]
-            and current_close > active_high["price"]
+            active_high is not None
+            and row["close"] > active_high
         ):
 
-            latest_choch = i
+            if trend == "BEARISH":
+
+                choch_events.append({
+                    "index": i,
+                    "close": row["close"],
+                    "ema200": row["ema200"],
+                    "close_time": int(row["close_time"])
+                })
 
             trend = "BULLISH"
 
-        previous_close = current_close
+    if not choch_events:
+        return None
 
-    return latest_choch
+    return choch_events[-1]
 
 
 # =========================================================
-# SIGNAL
+# SIGNAL CHECK
 # =========================================================
 
 def check_signal(symbol):
 
     try:
 
-        candles = get_klines(
-            symbol,
-            limit=250
-        )
+        # -------------------------------------------------
+        # Get candles
+        # -------------------------------------------------
 
-        if len(candles) < 230:
-            return None
+        klines = get_klines(symbol, limit=250)
 
-        df = create_dataframe(
-            candles
-        )
+        df = create_dataframe(klines)
 
-        if len(df) < 230:
-            return None
+        # Remove currently forming candle
+        current_time = int(time.time() * 1000)
+
+        df = df[
+            df["close_time"] < current_time
+        ].copy()
+
+        if len(df) < EMA_PERIOD + REQUIRED_CANDLES:
+
+            return {
+                "symbol": symbol,
+                "status": "NOT_ENOUGH_CANDLES",
+                "message": f"only {len(df)} closed candles"
+            }
+
+        # -------------------------------------------------
+        # EMA
+        # -------------------------------------------------
 
         df = calculate_ema(df)
 
-        # =================================================
-        # PRICE FILTER
-        # =================================================
+        # -------------------------------------------------
+        # Price filter
+        # -------------------------------------------------
 
-        current_price = float(
-            df.iloc[-1]["close"]
+        price = float(df.iloc[-1]["close"])
+
+        if price > MAX_PRICE:
+
+            return {
+                "symbol": symbol,
+                "status": "PRICE_FILTER",
+                "message": f"price ${price:.6f} > ${MAX_PRICE}"
+            }
+
+        # -------------------------------------------------
+        # Last 4 candles
+        # -------------------------------------------------
+
+        last4 = df.tail(REQUIRED_CANDLES)
+
+        above_ema = (
+            last4["close"] > last4["ema200"]
         )
 
-        if current_price > MAX_PRICE:
-            return None
+        above_count = int(above_ema.sum())
 
-        # =================================================
-        # LAST 4 CLOSED CANDLES
-        # ABOVE EMA200
-        # =================================================
+        if above_count < REQUIRED_CANDLES:
 
-        last_four = df.iloc[
-            -REQUIRED_CANDLES:
-        ].copy()
+            return {
+                "symbol": symbol,
+                "status": "EMA_FILTER",
+                "message": (
+                    f"{above_count}/{REQUIRED_CANDLES} "
+                    f"closed candles above EMA200 | "
+                    f"price=${price:.6f} "
+                    f"EMA=${df.iloc[-1]['ema200']:.6f}"
+                )
+            }
 
-        if len(last_four) != 4:
-            return None
+        # -------------------------------------------------
+        # Structure lookback
+        # -------------------------------------------------
 
-        if not (
-            last_four["close"]
-            > last_four["ema200"]
-        ).all():
-
-            return None
-
-        # =================================================
-        # PREVIOUS 8 HOURS
-        # =================================================
-
-        search_end = (
-            len(df)
-            - REQUIRED_CANDLES
-        )
-
-        search_start = max(
+        structure_start = max(
             0,
-            search_end
-            - CHOCH_LOOKBACK_CANDLES
+            len(df) - CHOCH_LOOKBACK_CANDLES - 100
         )
 
         recent_df = df.iloc[
-            search_start:search_end
+            structure_start:
         ].copy()
 
-        recent_df.reset_index(
-            drop=True,
-            inplace=True
-        )
-
-        if len(recent_df) < 15:
-            return None
-
-        # =================================================
-        # FIND STRUCTURE CHANGE
-        # =================================================
-
-        choch_index = detect_bullish_choch(
+        choch = detect_bullish_choch(
             recent_df
         )
 
-        if choch_index is None:
-            return None
+        if choch is None:
 
-        choch_candle = recent_df.iloc[
-            choch_index
-        ]
+            return {
+                "symbol": symbol,
+                "status": "NO_CHOCH",
+                "message": (
+                    f"last {CHOCH_LOOKBACK_CANDLES} candles "
+                    f"no bullish structure change"
+                )
+            }
+
+        # -------------------------------------------------
+        # CHOCH must be inside previous 8h
+        # -------------------------------------------------
+
+        first_signal_index = len(df) - REQUIRED_CANDLES
+
+        choch_global_time = choch["close_time"]
+
+        first_signal_time = int(
+            df.iloc[first_signal_index]["close_time"]
+        )
+
+        if choch_global_time >= first_signal_time:
+
+            return {
+                "symbol": symbol,
+                "status": "CHOCH_TOO_RECENT",
+                "message": (
+                    f"CHOCH happened after/between "
+                    f"the 4 EMA candles"
+                )
+            }
+
+        # -------------------------------------------------
+        # CHOCH candle must close below EMA200
+        # -------------------------------------------------
 
         choch_close = float(
-            choch_candle["close"]
+            choch["close"]
         )
 
         choch_ema = float(
-            choch_candle["ema200"]
+            choch["ema200"]
         )
-
-        # =================================================
-        # STRUCTURE CHANGE MUST BE BELOW EMA200
-        # =================================================
 
         if choch_close >= choch_ema:
-            return None
 
-        # =================================================
-        # STRUCTURE CHANGE MUST HAPPEN
-        # BEFORE THE 4 CANDLE RECLAIM
-        # =================================================
+            return {
+                "symbol": symbol,
+                "status": "CHOCH_ABOVE_EMA",
+                "message": (
+                    f"CHOCH close=${choch_close:.6f} "
+                    f">= EMA=${choch_ema:.6f}"
+                )
+            }
 
-        first_reclaim_time = int(
-            last_four.iloc[0]["open_time"]
-        )
-
-        choch_time = int(
-            choch_candle["open_time"]
-        )
-
-        if choch_time >= first_reclaim_time:
-            return None
-
-        # =================================================
-        # SIGNAL
-        # =================================================
-
-        last = last_four.iloc[-1]
+        # -------------------------------------------------
+        # SIGNAL FOUND
+        # -------------------------------------------------
 
         return {
             "symbol": symbol,
+            "status": "SIGNAL",
 
-            "price": float(
-                last["close"]
-            ),
+            "price": price,
+            "ema200": float(df.iloc[-1]["ema200"]),
 
-            "ema200": float(
-                last["ema200"]
-            ),
-
-            "candles": [
+            "closes": [
                 float(x)
-                for x in last_four["close"]
+                for x in last4["close"]
             ],
 
-            "ema_values": [
+            "emas": [
                 float(x)
-                for x in last_four["ema200"]
+                for x in last4["ema200"]
             ],
 
             "choch_close": choch_close,
-
             "choch_ema": choch_ema,
 
-            "choch_time": choch_time,
+            "choch_time": choch_global_time,
 
             "trigger_time": int(
-                last["close_time"]
+                df.iloc[-1]["close_time"]
             )
         }
 
-    except Exception as error:
+    except Exception as e:
 
-        print(
-            f"{symbol} ERROR: {error}"
-        )
-
-        return None
-
-
-# =========================================================
-# PRICE FORMAT
-# =========================================================
-
-def format_price(value):
-
-    if value >= 1:
-        return f"{value:.4f}"
-
-    if value >= 0.01:
-        return f"{value:.6f}"
-
-    if value >= 0.0001:
-        return f"{value:.8f}"
-
-    return f"{value:.12f}"
+        return {
+            "symbol": symbol,
+            "status": "ERROR",
+            "message": str(e)
+        }
 
 
 # =========================================================
-# TELEGRAM MESSAGE
+# TELEGRAM
 # =========================================================
 
-def create_message(signal):
+def format_price(price):
 
-    symbol = signal["symbol"]
+    if price >= 1:
+        return f"{price:.4f}"
 
-    candles = signal["candles"]
+    if price >= 0.01:
+        return f"{price:.6f}"
 
-    ema_values = signal["ema_values"]
+    if price >= 0.0001:
+        return f"{price:.8f}"
 
-    price = signal["price"]
-
-    ema200 = signal["ema200"]
-
-    choch_close = signal["choch_close"]
-
-    choch_ema = signal["choch_ema"]
-
-    message = (
-        "🚨 EMA 200 ALERT\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"🪙 Symbol: {symbol}\n"
-        "⏱ Timeframe: 15M\n"
-        f"💵 Price: ${format_price(price)}\n\n"
-
-        "🔹 Structure\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "✅ Bullish CHOCH\n"
-        "✅ CHOCH below EMA 200\n"
-        f"   Close: ${format_price(choch_close)}\n"
-        f"   EMA:   ${format_price(choch_ema)}\n\n"
-
-        "🔹 EMA Reclaim\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "✅ 4 CLOSED candles above EMA 200\n\n"
-
-        f"1️⃣ Close: ${format_price(candles[0])}\n"
-        f"   EMA:   ${format_price(ema_values[0])}\n\n"
-
-        f"2️⃣ Close: ${format_price(candles[1])}\n"
-        f"   EMA:   ${format_price(ema_values[1])}\n\n"
-
-        f"3️⃣ Close: ${format_price(candles[2])}\n"
-        f"   EMA:   ${format_price(ema_values[2])}\n\n"
-
-        f"4️⃣ Close: ${format_price(candles[3])}\n"
-        f"   EMA:   ${format_price(ema_values[3])}\n\n"
-
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🔎 Filters Passed\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "• Price <= $5\n"
-        "• Structure change within 8H\n"
-        "• Structure change below EMA200\n"
-        "• 4 closed candles above EMA200\n"
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    return message
+    return f"{price:.10f}"
 
 
-# =========================================================
-# TELEGRAM SEND
-# =========================================================
+def send_telegram(message):
 
-def send_to_chat(
-    chat_id,
-    message
-):
+    if not TELEGRAM_BOT_TOKEN:
+
+        print("Telegram bot token missing")
+
+        return False
+
+    if not TELEGRAM_CHAT_IDS:
+
+        print("Telegram chat IDs missing")
+
+        return False
 
     url = (
         f"https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
-    payload = {
-        "chat_id": chat_id,
-        "text": message
-    }
+    success = True
 
-    response = requests.post(
-        url,
-        json=payload,
-        timeout=20
-    )
-
-    response.raise_for_status()
-
-
-def send_telegram_to_all(signal):
-
-    message = create_message(
-        signal
-    )
-
-    for index, chat_id in enumerate(
-        TELEGRAM_CHAT_IDS,
-        start=1
-    ):
+    for chat_id in TELEGRAM_CHAT_IDS:
 
         try:
 
-            send_to_chat(
-                chat_id,
-                message
+            response = requests.post(
+                url,
+                data={
+                    "chat_id": chat_id,
+                    "text": message
+                },
+                timeout=20
             )
+
+            if response.ok:
+
+                print(
+                    f"Telegram sent -> {chat_id}"
+                )
+
+            else:
+
+                print(
+                    f"Telegram FAILED -> "
+                    f"{chat_id} | "
+                    f"{response.text}"
+                )
+
+                success = False
+
+        except Exception as e:
 
             print(
-                f"📨 {signal['symbol']} "
-                f"sent {index}/"
-                f"{len(TELEGRAM_CHAT_IDS)}"
+                f"Telegram ERROR -> "
+                f"{chat_id} | {e}"
             )
 
-        except Exception as error:
+            success = False
 
-            print(
-                f"❌ Telegram failed "
-                f"for {chat_id}: {error}"
-            )
+        time.sleep(TELEGRAM_DELAY)
 
-        if index < len(
-            TELEGRAM_CHAT_IDS
-        ):
+    return success
 
-            time.sleep(
-                TELEGRAM_DELAY
-            )
+
+# =========================================================
+# ALERT MESSAGE
+# =========================================================
+
+def create_alert_message(signal):
+
+    symbol = signal["symbol"]
+
+    price = format_price(
+        signal["price"]
+    )
+
+    ema = format_price(
+        signal["ema200"]
+    )
+
+    choch_close = format_price(
+        signal["choch_close"]
+    )
+
+    choch_ema = format_price(
+        signal["choch_ema"]
+    )
+
+    return (
+        "🚨 EMA200 SETUP\n\n"
+        f"Symbol: {symbol}\n"
+        f"Price: ${price}\n"
+        f"EMA200: ${ema}\n\n"
+        "✅ 4 CLOSED candles above EMA200\n"
+        "✅ Bullish structure change found\n"
+        f"Structure close: ${choch_close}\n"
+        f"Structure EMA200: ${choch_ema}\n"
+        "✅ Structure close below EMA200\n\n"
+        f"Timeframe: {INTERVAL}"
+    )
+
+
+# =========================================================
+# STATE
+# =========================================================
+
+def load_state():
+
+    if not os.path.exists(STATE_FILE):
+        return {}
+
+    try:
+
+        with open(
+            STATE_FILE,
+            "r"
+        ) as f:
+
+            return json.load(f)
+
+    except Exception:
+
+        return {}
+
+
+def save_state(state):
+
+    with open(
+        STATE_FILE,
+        "w"
+    ) as f:
+
+        json.dump(
+            state,
+            f,
+            indent=2
+        )
 
 
 # =========================================================
@@ -714,51 +621,19 @@ def send_telegram_to_all(signal):
 
 def main():
 
-    print(
-        "=========================================="
-    )
+    print("=" * 50)
+    print("Binance EMA 200 Telegram Scanner - DEBUG")
+    print("=" * 50)
 
-    print(
-        " Binance EMA 200 Telegram Scanner"
-    )
+    print(f"Timeframe        : {INTERVAL}")
+    print(f"EMA              : {EMA_PERIOD}")
+    print(f"Structure        : {STRUCTURE_LENGTH}")
+    print(f"Price filter     : <= ${MAX_PRICE}")
+    print(f"Lookback         : {CHOCH_LOOKBACK_CANDLES} candles")
+    print(f"Workers          : {MAX_WORKERS}")
+    print(f"Telegram chats   : {len(TELEGRAM_CHAT_IDS)}")
 
-    print(
-        "=========================================="
-    )
-
-    print(
-        f"Timeframe       : {INTERVAL}"
-    )
-
-    print(
-        f"EMA             : {EMA_PERIOD}"
-    )
-
-    print(
-        f"Structure       : {STRUCTURE_LENGTH}"
-    )
-
-    print(
-        f"Price filter    : <= ${MAX_PRICE}"
-    )
-
-    print(
-        f"Lookback        : {CHOCH_LOOKBACK_CANDLES} candles"
-    )
-
-    print(
-        f"Workers         : {MAX_WORKERS}"
-    )
-
-    print(
-        f"Telegram chats  : {len(TELEGRAM_CHAT_IDS)}"
-    )
-
-    print(
-        "=========================================="
-    )
-
-    state = load_state()
+    print("=" * 50)
 
     symbols = get_usdt_symbols()
 
@@ -766,17 +641,21 @@ def main():
         f"Found {len(symbols)} USDT pairs"
     )
 
-    signals = []
+    print("=" * 50)
 
-    # =====================================================
-    # PARALLEL SCAN
-    # =====================================================
+    state = load_state()
+
+    results = []
+
+    # -----------------------------------------------------
+    # Parallel scan
+    # -----------------------------------------------------
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        future_map = {
+        futures = {
             executor.submit(
                 check_signal,
                 symbol
@@ -786,59 +665,112 @@ def main():
 
         completed = 0
 
-        for future in as_completed(
-            future_map
-        ):
+        for future in as_completed(futures):
 
-            symbol = future_map[
-                future
-            ]
+            symbol = futures[future]
 
             completed += 1
 
-            try:
+            result = future.result()
 
-                signal = future.result()
+            results.append(result)
 
-                if signal is None:
+            status = result["status"]
 
-                    print(
-                        f"[{completed}/{len(symbols)}] "
-                        f"{symbol} - no signal"
-                    )
+            # =================================================
+            # DEBUG LOG
+            # =================================================
 
-                    continue
+            if status == "SIGNAL":
 
                 print(
                     f"[{completed}/{len(symbols)}] "
-                    f"🚨 SETUP: {symbol}"
+                    f"{symbol} -> 🚨 SIGNAL | "
+                    f"Price=${format_price(result['price'])} | "
+                    f"EMA=${format_price(result['ema200'])} | "
+                    f"CHOCH=${format_price(result['choch_close'])}"
                 )
 
-                signals.append(
-                    signal
-                )
-
-            except Exception as error:
+            elif status == "PRICE_FILTER":
 
                 print(
-                    f"{symbol} ERROR: {error}"
+                    f"[{completed}/{len(symbols)}] "
+                    f"{symbol} -> ❌ PRICE | "
+                    f"{result['message']}"
+                )
+
+            elif status == "EMA_FILTER":
+
+                print(
+                    f"[{completed}/{len(symbols)}] "
+                    f"{symbol} -> ❌ EMA | "
+                    f"{result['message']}"
+                )
+
+            elif status == "NO_CHOCH":
+
+                print(
+                    f"[{completed}/{len(symbols)}] "
+                    f"{symbol} -> ❌ STRUCTURE | "
+                    f"{result['message']}"
+                )
+
+            elif status == "CHOCH_ABOVE_EMA":
+
+                print(
+                    f"[{completed}/{len(symbols)}] "
+                    f"{symbol} -> ❌ CHOCH EMA | "
+                    f"{result['message']}"
+                )
+
+            elif status == "CHOCH_TOO_RECENT":
+
+                print(
+                    f"[{completed}/{len(symbols)}] "
+                    f"{symbol} -> ❌ CHOCH TIMING | "
+                    f"{result['message']}"
+                )
+
+            elif status == "NOT_ENOUGH_CANDLES":
+
+                print(
+                    f"[{completed}/{len(symbols)}] "
+                    f"{symbol} -> ❌ DATA | "
+                    f"{result['message']}"
+                )
+
+            elif status == "ERROR":
+
+                print(
+                    f"[{completed}/{len(symbols)}] "
+                    f"{symbol} -> ⚠️ ERROR | "
+                    f"{result['message']}"
                 )
 
     # =====================================================
     # PROCESS SIGNALS
     # =====================================================
 
+    signals = [
+        r
+        for r in results
+        if r["status"] == "SIGNAL"
+    ]
+
+    print("=" * 50)
+    print(
+        f"Setups found: {len(signals)}"
+    )
+
     new_alerts = 0
+
+    # =====================================================
+    # SEND ALERTS
+    # =====================================================
 
     for signal in signals:
 
         symbol = signal["symbol"]
-
-        # -------------------------------------------------
-        # SETUP ID
-        #
-        # CHOCH time identifies the setup.
-        # -------------------------------------------------
 
         setup_id = str(
             signal["choch_time"]
@@ -848,10 +780,6 @@ def main():
             symbol
         )
 
-        # =================================================
-        # ALREADY ALERTED FOR THIS SETUP
-        # =================================================
-
         if (
             previous_state is not None
             and previous_state.get("setup_id")
@@ -859,21 +787,25 @@ def main():
         ):
 
             print(
-                f"{symbol} - "
-                f"already alerted for this setup"
+                f"{symbol} -> 🔁 DUPLICATE "
+                f"(already alerted)"
             )
 
             continue
 
-        # =================================================
-        # NEW ALERT
-        # =================================================
+        message = create_alert_message(
+            signal
+        )
 
-        try:
+        print(
+            f"{symbol} -> 📲 Sending Telegram..."
+        )
 
-            send_telegram_to_all(
-                signal
-            )
+        sent = send_telegram(
+            message
+        )
+
+        if sent:
 
             state[symbol] = {
                 "setup_id": setup_id,
@@ -882,47 +814,29 @@ def main():
                 )
             }
 
-            save_state(
-                state
-            )
-
             new_alerts += 1
 
-            print(
-                f"🚨 ALERT SENT: {symbol}"
-            )
+    # =====================================================
+    # SAVE STATE
+    # =====================================================
 
-        except Exception as error:
+    save_state(state)
 
-            print(
-                f"Signal send error "
-                f"for {symbol}: {error}"
-            )
-
-    save_state(
-        state
-    )
-
-    print(
-        "=========================================="
-    )
-
-    print(
-        "Scan completed"
-    )
-
+    print("=" * 50)
     print(
         f"Setups found : {len(signals)}"
     )
-
     print(
         f"New alerts   : {new_alerts}"
     )
+    print("=" * 50)
 
-    print(
-        "=========================================="
-    )
+    print("Scan completed")
 
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
     main()
