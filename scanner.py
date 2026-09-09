@@ -776,22 +776,30 @@ def main():
             signal["choch_time"]
         )
 
-        previous_state = state.get(
-            symbol
-        )
+        previous_state = state.get(symbol)
 
-        if (
-            previous_state is not None
-            and previous_state.get("setup_id")
-            == setup_id
-        ):
+# Handle old state format
+if isinstance(previous_state, str):
 
-            print(
-                f"{symbol} -> 🔁 DUPLICATE "
-                f"(already alerted)"
-            )
+    previous_setup_id = previous_state
 
-            continue
+elif isinstance(previous_state, dict):
+
+    previous_setup_id = previous_state.get("setup_id")
+
+else:
+
+    previous_setup_id = None
+
+
+if previous_setup_id == setup_id:
+
+    print(
+        f"{symbol} -> 🔁 DUPLICATE "
+        f"(already alerted)"
+    )
+
+    continue
 
         message = create_alert_message(
             signal
