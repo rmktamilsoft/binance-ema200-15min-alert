@@ -2,11 +2,12 @@ name: Binance EMA200 Telegram Scanner
 
 on:
   schedule:
-    # Every 15 minutes
-    - cron: "*/15 * * * *"
-
-  # Allows manual testing from GitHub
+    - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
+
+concurrency:
+  group: binance-ema200-scanner
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -16,7 +17,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -38,10 +38,6 @@ jobs:
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
         run: |
           python scanner.py
-
-      # ---------------------------------------------
-      # Save alert state for the next 15-minute run
-      # ---------------------------------------------
 
       - name: Save alert state
         run: |
